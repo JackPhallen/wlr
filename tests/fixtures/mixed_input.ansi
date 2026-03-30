@@ -1,0 +1,7 @@
+plain line
+[31mred error[0m
+[32mgreen ok[0m
+[1;31mbold red still red[0m
+]0;ignored-title[31mred with osc[0m
+[38;5;208morange warning[0m
+[38;2;148;0;211mviolet panic[0m
