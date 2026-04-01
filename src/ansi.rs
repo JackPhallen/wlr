@@ -1,15 +1,11 @@
 use std::io::{self, Write};
 
 use crate::colors::{ColorSelection, FgColor};
+use crate::emitter::{FilterConfig, LineEmitter};
 
 // Raw byte constants used by the ANSI parser.
 const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
-const NEWLINE: u8 = b'\n';
-const TAB: u8 = b'\t';
-const CSI_INTRO: u8 = b'[';
-const OSC_INTRO: u8 = b']';
-const ST_TERMINATOR: u8 = b'\\';
 
 // SGR codes we care about for foreground color tracking.
 const SGR_RESET: i64 = 0;
@@ -29,44 +25,24 @@ const CSI_FINAL_BYTE_END: u8 = 0x7e;
 const SGR_FINAL_BYTE: u8 = b'm';
 
 pub struct ColorLineFilter {
-    // User-selected matching rule to keep.
     selection: ColorSelection,
-    // Bytes written between matching blocks when at least one non-matching line
-    // occurred in between. The default is a single `\n`, which creates a blank
-    // line between emitted sections because the matching lines already carry
-    // their own trailing newlines.
-    separator: Vec<u8>,
-    // Exact bytes for the current line, including ANSI escapes. We keep these
-    // so a matching line can be emitted exactly as it arrived.
+    emitter: LineEmitter,
     line_raw: Vec<u8>,
-    // Once any printable character on the line is seen in the target color, the
-    // whole line is kept.
     line_matches: bool,
-    // Current foreground color as established by the most recent SGR sequence.
     fg: FgColor,
-    // Cached result of `selection.matches(fg)` so printable text only needs a
-    // boolean check in the hot path.
     fg_matches_target: bool,
-    // Whether we have already emitted at least one matching block.
-    emitted_block: bool,
-    // Whether one or more non-matching lines have occurred since the last
-    // emitted block. If the next line matches, we emit `separator` first.
-    pending_separator: bool,
-    // Streaming parser state. This persists across read() chunk boundaries.
-    parser: AnsiParser,
+    parser: AnsiParser, // State
 }
 
 impl ColorLineFilter {
-    pub fn new(selection: ColorSelection, separator: Vec<u8>) -> Self {
+    pub fn new(selection: ColorSelection, config: FilterConfig) -> Self {
         Self {
             selection,
-            separator,
+            emitter: LineEmitter::new(config),
             line_raw: Vec::new(),
             line_matches: false,
             fg: FgColor::Default,
             fg_matches_target: false,
-            emitted_block: false,
-            pending_separator: false,
             parser: AnsiParser::new(),
         }
     }
@@ -79,8 +55,6 @@ impl ColorLineFilter {
 
             match self.parser.advance(byte) {
                 ParserEvent::Printable => {
-                    // We only need one matching printable character to keep the
-                    // entire raw line.
                     if self.fg_matches_target {
                         self.line_matches = true;
                     }
@@ -89,20 +63,12 @@ impl ColorLineFilter {
                     self.fg = fg;
                     self.fg_matches_target = self.selection.matches(self.fg);
                 }
-                // We flush on raw newline bytes rather than parser callbacks so
-                // line handling stays simple and byte-accurate.
                 ParserEvent::FlushLine => {
-                    if self.line_matches {
-                        if self.emitted_block && self.pending_separator {
-                            out.write_all(&self.separator)?;
-                        }
-                        out.write_all(&self.line_raw)?;
-                        self.emitted_block = true;
-                        self.pending_separator = false;
-                    } else if self.emitted_block {
-                        self.pending_separator = true;
-                    }
-                    self.line_raw.clear();
+                    self.emitter.finish_line(
+                        std::mem::take(&mut self.line_raw),
+                        self.line_matches,
+                        out,
+                    )?;
                     self.line_matches = false;
                 }
                 ParserEvent::None => {}
@@ -112,17 +78,16 @@ impl ColorLineFilter {
         Ok(())
     }
 
+    /// Final flush
     pub fn finish<W: Write>(&mut self, out: &mut W) -> io::Result<()> {
-        // EOF may arrive without a trailing newline. In that case we still want
-        // to emit the buffered line if it matched.
-        if !self.line_raw.is_empty() && self.line_matches {
-            if self.emitted_block && self.pending_separator {
-                out.write_all(&self.separator)?;
-            }
-            out.write_all(&self.line_raw)?;
+        if !self.line_raw.is_empty() {
+            self.emitter.finish_line(
+                std::mem::take(&mut self.line_raw),
+                self.line_matches,
+                out,
+            )?;
         }
 
-        self.line_raw.clear();
         self.line_matches = false;
         Ok(())
     }
@@ -170,7 +135,6 @@ struct AnsiParser {
 }
 
 enum ParserState {
-    // Default state: ordinary bytes, control bytes, or the start of an escape.
     Ground,
     // We just saw ESC and are waiting to learn which escape family this is.
     Escape,
@@ -208,24 +172,21 @@ impl AnsiParser {
         let state = std::mem::replace(&mut self.state, ParserState::Ground);
         let (next_state, event) = match state {
             ParserState::Ground => match byte {
-                // ESC starts an ANSI escape sequence. We need one more byte to
-                // learn which kind of sequence it is, so transition to Escape.
                 ESC => (ParserState::Escape, ParserEvent::None),
-                // We treat raw newline bytes as the only line delimiter.
-                NEWLINE => (ParserState::Ground, ParserEvent::FlushLine),
+                b'\n' => (ParserState::Ground, ParserEvent::FlushLine),
                 // Printable ASCII and tabs count as visible output. This is the
                 // signal the filter uses to decide whether the current line
                 // contains any text in the target color.
-                0x20..=0x7e | TAB => (ParserState::Ground, ParserEvent::Printable),
+                0x20..=0x7e | b'\t' => (ParserState::Ground, ParserEvent::Printable),
                 // Other control bytes are ignored.
                 _ => (ParserState::Ground, ParserEvent::None),
             },
             ParserState::Escape => match byte {
                 // ESC [ introduces a CSI sequence such as ESC[31m.
-                CSI_INTRO => (ParserState::Csi(CsiState::new()), ParserEvent::None),
+                b'[' => (ParserState::Csi(CsiState::new()), ParserEvent::None),
                 // ESC ] introduces an OSC sequence such as a terminal-title
                 // update. We do not interpret its contents; we just skip it.
-                OSC_INTRO => (ParserState::Osc, ParserEvent::None),
+                b']' => (ParserState::Osc, ParserEvent::None),
                 // Any other ESC sequence is not relevant to this tool, so we
                 // drop back to Ground immediately.
                 _ => (ParserState::Ground, ParserEvent::None),
@@ -274,7 +235,7 @@ impl AnsiParser {
                 // If the byte after ESC is `\`, then we saw the full ST
                 // terminator and can return to Ground. Otherwise the ESC was
                 // just part of the OSC payload, so resume skipping OSC bytes.
-                let next_state = if byte == ST_TERMINATOR {
+                let next_state = if byte == b'\\' {
                     ParserState::Ground
                 } else {
                     ParserState::Osc

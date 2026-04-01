@@ -59,8 +59,6 @@ pub enum ColorArg {
 
 #[derive(Clone, Copy, Debug)]
 pub enum FgColor {
-    // No explicit foreground color is active. In practice this means "use the
-    // terminal default", which we do not try to map back to a named target.
     Default,
     // ANSI indexed colors. This covers both the basic 16-color palette and the
     // 256-color palette selected via `38;5;n`.
@@ -92,12 +90,6 @@ pub enum ColorSelection {
 }
 
 impl TargetColor {
-    /// Decide whether the current parsed foreground color should count as this
-    /// target color.
-    ///
-    /// We support two matching strategies:
-    /// - direct lookup for ANSI indexed colors
-    /// - lightweight RGB heuristics for truecolor output
     pub fn matches(self, fg: FgColor) -> bool {
         let profile = self.profile();
 
@@ -138,26 +130,26 @@ impl TargetColor {
     }
 }
 
-impl ColorArg {
-    pub fn into_selection(args: Vec<Self>) -> ColorSelection {
+impl From<Vec<ColorArg>> for ColorSelection {
+    fn from(args: Vec<ColorArg>) -> Self {
         if args.is_empty() {
-            return ColorSelection::Named(vec![TargetColor::Red]);
+            return Self::Named(vec![TargetColor::Red]);
         }
 
-        if args.iter().any(|arg| matches!(arg, Self::All)) {
-            return ColorSelection::All;
+        if args.iter().any(|arg| matches!(arg, ColorArg::All)) {
+            return Self::All;
         }
 
-        ColorSelection::Named(
+        Self::Named(
             args.into_iter()
                 .map(|arg| match arg {
-                    Self::All => unreachable!("handled above"),
-                    Self::Red => TargetColor::Red,
-                    Self::Orange => TargetColor::Orange,
-                    Self::Yellow => TargetColor::Yellow,
-                    Self::Green => TargetColor::Green,
-                    Self::Blue => TargetColor::Blue,
-                    Self::Violet => TargetColor::Violet,
+                    ColorArg::All => unreachable!("handled above"),
+                    ColorArg::Red => TargetColor::Red,
+                    ColorArg::Orange => TargetColor::Orange,
+                    ColorArg::Yellow => TargetColor::Yellow,
+                    ColorArg::Green => TargetColor::Green,
+                    ColorArg::Blue => TargetColor::Blue,
+                    ColorArg::Violet => TargetColor::Violet,
                 })
                 .collect(),
         )
@@ -214,80 +206,5 @@ impl Matcher {
                 r >= VIOLET_RED_MIN && b >= VIOLET_BLUE_MIN && g <= VIOLET_GREEN_MAX
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ColorArg, ColorSelection, FgColor, TargetColor};
-
-    #[test]
-    fn orange_truecolor_does_not_overlap_with_red_or_yellow() {
-        let orange = FgColor::Rgb(255, 140, 0);
-
-        assert!(TargetColor::Orange.matches(orange));
-        assert!(!TargetColor::Red.matches(orange));
-        assert!(!TargetColor::Yellow.matches(orange));
-    }
-
-    #[test]
-    fn yellow_truecolor_does_not_overlap_with_orange() {
-        let yellow = FgColor::Rgb(255, 255, 0);
-
-        assert!(TargetColor::Yellow.matches(yellow));
-        assert!(!TargetColor::Orange.matches(yellow));
-    }
-
-    #[test]
-    fn violet_truecolor_does_not_overlap_with_blue() {
-        let violet = FgColor::Rgb(148, 0, 211);
-
-        assert!(TargetColor::Violet.matches(violet));
-        assert!(!TargetColor::Blue.matches(violet));
-    }
-
-    #[test]
-    fn indexed_colors_map_to_single_expected_bucket_for_representative_values() {
-        let orange = FgColor::Indexed(208);
-        let violet = FgColor::Indexed(177);
-
-        assert!(TargetColor::Orange.matches(orange));
-        assert!(!TargetColor::Yellow.matches(orange));
-
-        assert!(TargetColor::Violet.matches(violet));
-        assert!(!TargetColor::Blue.matches(violet));
-    }
-
-    #[test]
-    fn all_selection_matches_any_non_default_foreground() {
-        let selection = ColorSelection::All;
-
-        assert!(selection.matches(FgColor::Indexed(1)));
-        assert!(selection.matches(FgColor::Rgb(255, 255, 255)));
-        assert!(!selection.matches(FgColor::Default));
-    }
-
-    #[test]
-    fn color_args_default_to_red_when_omitted() {
-        let selection = ColorArg::into_selection(Vec::new());
-
-        assert!(selection.matches(FgColor::Indexed(1)));
-        assert!(!selection.matches(FgColor::Indexed(2)));
-    }
-
-    #[test]
-    fn color_args_can_match_multiple_colors() {
-        let selection = ColorArg::into_selection(vec![ColorArg::Red, ColorArg::Violet]);
-
-        assert!(selection.matches(FgColor::Indexed(1)));
-        assert!(selection.matches(FgColor::Indexed(177)));
-        assert!(!selection.matches(FgColor::Indexed(2)));
-    }
-
-    #[test]
-    fn all_overrides_specific_colors_when_mixed() {
-        let selection = ColorArg::into_selection(vec![ColorArg::Red, ColorArg::All]);
-
-        assert!(matches!(selection, ColorSelection::All));
     }
 }

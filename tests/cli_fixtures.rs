@@ -3,7 +3,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use wlr::ansi::ColorLineFilter;
-use wlr::colors::ColorArg;
+use wlr::colors::{ColorArg, ColorSelection};
+use wlr::emitter::FilterConfig;
 
 fn fixture(path: &str) -> Vec<u8> {
     fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap()
@@ -75,8 +76,12 @@ fn filter_keeps_state_across_chunk_boundaries() {
     let expected = fixture("tests/fixtures/red.expected");
 
     let mut filter = ColorLineFilter::new(
-        ColorArg::into_selection(vec![ColorArg::Red]),
-        b"\n".to_vec(),
+        ColorSelection::from(vec![ColorArg::Red]),
+        FilterConfig {
+            separator: b"\n".to_vec(),
+            before: 0,
+            after: 0,
+        },
     );
     let mut out = Vec::new();
 
@@ -134,6 +139,39 @@ fn empty_separator_disables_block_spacing() {
 
     assert_eq!(
         run_binary_args(&["--color", "red", "--separator", ""], &input),
+        expected
+    );
+}
+
+#[test]
+fn after_context_stops_before_next_matching_blob_and_starts_new_section() {
+    let input = fixture("tests/fixtures/context_input.ansi");
+    let expected = fixture("tests/fixtures/context_after.expected");
+
+    assert_eq!(
+        run_binary_args(&["--color", "red", "--after", "10"], &input),
+        expected
+    );
+}
+
+#[test]
+fn overlapping_before_and_after_context_merges_sections() {
+    let input = fixture("tests/fixtures/context_input.ansi");
+    let expected = fixture("tests/fixtures/context_overlap.expected");
+
+    assert_eq!(
+        run_binary_args(&["--color", "red", "--before", "5", "--after", "5"], &input),
+        expected
+    );
+}
+
+#[test]
+fn before_context_clips_cleanly_at_start_of_file() {
+    let input = fixture("tests/fixtures/context_before_edge_input.ansi");
+    let expected = fixture("tests/fixtures/context_before_edge.expected");
+
+    assert_eq!(
+        run_binary_args(&["--color", "red", "--before", "5", "--after", "0"], &input),
         expected
     );
 }
